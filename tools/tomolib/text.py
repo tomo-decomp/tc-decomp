@@ -69,9 +69,30 @@ def parse_bmg(data: bytes) -> tuple[int, str, list[tuple[int, str]]]:
         # The header's id is unreliable on this cartridge (every bank says 2,
         # while the strings are really UTF-16LE), so the text itself decides.
         codec = detect_encoding(data, payload + offsets[0], payload_end)
-    messages = [(i, decode_string(data, payload + offset, payload_end, codec))
-                for i, offset in enumerate(offsets)]
+
+    # Each message runs from its own offset to the next one.  Slicing by the
+    # index matters: the text contains 0x1A escape sequences whose arguments
+    # include zero words, so stopping at the first 0x0000 would truncate those
+    # messages and silently drop text.
+    messages: list[tuple[int, str]] = []
+    for i, offset in enumerate(offsets):
+        start = payload + offset
+        stop = (payload + offsets[i + 1]) if i + 1 < len(offsets) else payload_end
+        messages.append((i, decode_range(data, start, min(stop, payload_end), codec)))
     return encoding, codec, messages
+
+
+def decode_range(data: bytes, start: int, end: int, codec: str) -> str:
+    """Decodes one message's byte range, dropping its terminator only."""
+    chunk = data[start:end]
+    if codec.startswith("utf-16"):
+        if len(chunk) % 2:
+            chunk = chunk[:-1]
+        while len(chunk) >= 2 and chunk[-2:] == b"\x00\x00":
+            chunk = chunk[:-2]
+        return chunk.decode(codec, errors="backslashreplace")
+    chunk = chunk.split(b"\x00")[0]
+    return chunk.decode(codec, errors="backslashreplace")
 
 
 def detect_encoding(data: bytes, start: int, end: int) -> str:

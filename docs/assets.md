@@ -93,6 +93,13 @@ really **UTF-16LE**: `i0c0a0k0` decodes to `どっちか`.  The extractor theref
 scores a sample both ways and uses the one that reads as kana/kanji/ASCII, and
 records the winner in `convert.tsv`.
 
+Message boundaries come from the `INF1` offsets, not from scanning for a
+terminator: the text carries `0x1A` escape sequences whose arguments include
+zero words (`1a 00 08 ff 00 00 01 00` is one such pair), so stopping at the
+first `0x0000` would cut a message short and drop text.  Slicing each entry
+`[offset_i, offset_i+1)` keeps every byte, and the escapes survive the TSV as
+`\xNN` so they can be translated around or re-emitted untouched.
+
 `text.write_tsv` / `text.read_tsv` round-trip losslessly: control bytes become
 `\xNN`, tabs and newlines become `\t` / `\n`, so a translated file can be read
 back without guessing.
