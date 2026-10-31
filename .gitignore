@@ -1,0 +1,9 @@
+# Generated, never committed
+extract/
+build/
+
+# Tooling caches and downloaded toolchains (future milestones)
+tools/mwccarm/
+tools/gcc-arm/
+__pycache__/
+*.pyc

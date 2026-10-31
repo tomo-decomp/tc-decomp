@@ -1,0 +1,7 @@
+# CodeWarrior for ARM version the game was built with. The matching harness
+# (tools/match.py) and meson/cross.ini must use the same one.
+option('mwcc_version', type : 'combo',
+    choices : ['2.0/base', '2.0/sp1', '2.0/sp1p2', '2.0/sp1p5', '2.0/sp1p6',
+               '2.0/sp1p7', '2.0/sp2', '2.0/sp2p2', '2.0/sp2p3', '2.0/sp2p4'],
+    value : '2.0/sp2')
+option('check_verbose', type : 'boolean', value : false)
