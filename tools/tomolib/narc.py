@@ -1,15 +1,22 @@
 """Nintendo DS NARC archives.
 
-A NARC is the DS "nitro archive": a header, then three named chunks.
+A NARC ("nitro archive") is a 0x10-byte header followed by three chunks:
 
-    NARC
-    BTAF  file allocation table: base offset + (start, end) pairs
-    BTNF  file name table (same layout as a ROM's FNT)
-    GMIF  the file data, addressed by the BTAF offsets
+    NARC  header: BOM, version, total size, header size, section count
+    BTAF  file allocation table: file count, then (start, end) pairs, offsets
+          relative to the start of the GMIF payload
+    BTNF  file name table: directory table, then the names
+    GMIF  the file data
 
-Everything in Tomodachi Collection's filesystem except the ARM9 overlays is a
-NARC, and archives nest (a `Map` archive contains `Model` archives, and so on),
-so the asset tools recurse until they reach a leaf format.
+The directory table is an array of
+
+    name_offset  u32   relative to the start of the directory table
+    first_file   u16   first file id owned by this directory
+    dir_count    u16   number of directories; for the root entry this field is
+                       the table length in the DS SDK's own writer
+
+The layout here matches `tools/nitroarc` in pokeplatinum/pokeheartgold, which
+is the reference these tools were written against.
 """
 
 from __future__ import annotations
@@ -22,6 +29,11 @@ MAGIC = b"NARC"
 BTAF = b"BTAF"
 BTNF = b"BTNF"
 GMIF = b"GMIF"
+
+NARC_HEADER_SIZE = 0x10
+FATB_HEADER_SIZE = 0x0C
+FNTB_HEADER_SIZE = 0x08
+FIMG_HEADER_SIZE = 0x08
 
 
 class NarcError(ValueError):
@@ -48,90 +60,93 @@ class Member:
 
 @dataclass
 class Narc:
-    """A parsed archive: ordered members plus its original chunk layout."""
+    """A parsed archive: ordered members plus its original header fields."""
 
     members: list[Member] = field(default_factory=list)
     version: int = 0
 
     @classmethod
     def parse(cls, data: bytes) -> "Narc":
-        if len(data) < 0x10 or data[:4] != MAGIC:
+        if len(data) < NARC_HEADER_SIZE or data[:4] != MAGIC:
             raise NarcError("not a NARC")
-        header_size = struct.unpack_from("<H", data, 0x0C)[0]
-        if header_size < 0x10:
-            raise NarcError(f"unexpected NARC header size {header_size:#x}")
-        chunk_count = struct.unpack_from("<H", data, 0x0E)[0]
-        chunks: dict[bytes, tuple[int, int]] = {}
-        off = header_size
-        for _ in range(chunk_count):
-            if off + 8 > len(data):
-                raise NarcError("chunk table runs past the end")
-            magic = data[off:off + 4]
-            chunk_size = struct.unpack_from("<I", data, off + 4)[0]
-            if off + chunk_size > len(data):
-                raise NarcError(f"{magic!r} chunk runs past the end")
-            chunks[magic] = (off, chunk_size)
-            off += chunk_size
-        for needed in (BTAF, GMIF):
-            if needed not in chunks:
-                raise NarcError(f"missing {needed!r} chunk")
+        version, total, header_size, section_count = struct.unpack_from(
+            "<HIHH", data, 0x06)
+        if header_size < NARC_HEADER_SIZE or header_size > len(data):
+            raise NarcError(f"bad header size {header_size:#x}")
 
-        btaf_off, _ = chunks[BTAF]
-        count = struct.unpack_from("<H", data, btaf_off + 8)[0]
-        base = struct.unpack_from("<I", data, btaf_off + 0x0C)[0]
-        if btaf_off + 0x10 + count * 8 > len(data):
+        sections: dict[bytes, tuple[int, int]] = {}
+        off = header_size
+        for _ in range(section_count):
+            if off + 8 > len(data):
+                raise NarcError("section table runs past the end")
+            magic = data[off:off + 4]
+            size = struct.unpack_from("<I", data, off + 4)[0]
+            if size < 8 or off + size > len(data):
+                raise NarcError(f"{magic!r} section has a bad size {size:#x}")
+            sections[magic] = (off, size)
+            off += size
+        for needed in (BTAF, GMIF):
+            if needed not in sections:
+                raise NarcError(f"missing {needed!r} section")
+
+        btaf_off, _ = sections[BTAF]
+        count = struct.unpack_from("<H", data, btaf_off + 0x08)[0]
+        first = btaf_off + FATB_HEADER_SIZE
+        if first + count * 8 > len(data):
             raise NarcError("BTAF entries run past the end")
 
         names: dict[int, str] = {}
-        if BTNF in chunks:
-            btnf_off, btnf_size = chunks[BTNF]
-            names = _parse_btxf(data[btnf_off:btnf_off + btnf_size])
+        if BTNF in sections:
+            fnt_off, fnt_size = sections[BTNF]
+            names = _parse_fntb(data[fnt_off:fnt_off + fnt_size])
 
-        gmif_off, gmif_size = chunks[GMIF]
+        gmif_off, gmif_size = sections[GMIF]
+        payload = gmif_off + FIMG_HEADER_SIZE
+        limit = gmif_off + gmif_size
         members: list[Member] = []
         for fid in range(count):
-            start, end = struct.unpack_from("<II", data, btaf_off + 0x10 + fid * 8)
-            start -= base
-            end -= base
-            if start > end or gmif_off + 8 + end > len(data):
+            start, end = struct.unpack_from("<II", data, first + fid * 8)
+            if start > end or payload + end > limit:
                 raise NarcError(f"member {fid} has a bad range")
-            members.append(Member(
-                id=fid,
-                path=names.get(fid, f"file{fid:03d}"),
-                data=data[gmif_off + 8 + start:gmif_off + 8 + end],
-            ))
-        return cls(members=members, version=struct.unpack_from("<H", data, 0x06)[0])
+            members.append(Member(id=fid,
+                                  path=names.get(fid, f"file{fid:03d}"),
+                                  data=data[payload + start:payload + end]))
+        del total
+        return cls(members=members, version=version)
 
 
-def _parse_btxf(btxf: bytes) -> dict[int, str]:
-    """Parses a BTNF/BTXT name table: paths by file id."""
-    if len(btxf) < 8 or btxf[:4] not in (BTNF, b"BTXT"):
+def _parse_fntb(fnt: bytes) -> dict[int, str]:
+    """Parses a BTNF directory/name table into paths by file id."""
+    if len(fnt) < FNTB_HEADER_SIZE + 8:
         return {}
-    dir_count = struct.unpack_from("<H", btfx, 6)[0]
-    if 8 + dir_count * 8 > len(btxf):
+    table = fnt[FNTB_HEADER_SIZE:]
+    count = struct.unpack_from("<H", table, 6)[0] & 0x0FFF
+    if count == 0 or 8 * count > len(table):
         return {}
-    dirs = [struct.unpack_from("<IH", btfx, 8 + d * 8) for d in range(dir_count)]
+    dirs = [struct.unpack_from("<IHH", table, 8 * d) for d in range(count)]
+
     paths: dict[int, str] = {}
     seen: set[int] = set()
     stack = [(0, "")]
     while stack:
         d, prefix = stack.pop()
-        if d in seen or d >= dir_count:
+        if d in seen or d >= count:
             continue
         seen.add(d)
-        pos, file_id = dirs[d]
-        while pos < len(btxf):
-            length = btfx[pos]
+        name_off, file_id, _ = dirs[d]
+        pos = name_off
+        while pos < len(table):
+            length = table[pos]
             pos += 1
             if length == 0:
                 break
             name_len = length & 0x7F
-            name = btfx[pos:pos + name_len].decode("shift-jis", errors="replace")
+            name = table[pos:pos + name_len].decode("shift-jis", errors="replace")
             pos += name_len
             if length & 0x80:
-                if pos + 2 > len(btxf):
+                if pos + 2 > len(table):
                     break
-                child = struct.unpack_from("<H", btfx, pos)[0] & 0x0FFF
+                child = struct.unpack_from("<H", table, pos)[0] & 0x0FFF
                 pos += 2
                 stack.append((child, prefix + name + "/"))
             else:
@@ -144,47 +159,42 @@ def is_narc(data: bytes) -> bool:
     return data[:4] == MAGIC
 
 
-def build(members: list[Member], base: int = 0x02000000, version: int = 0x0001) -> bytes:
-    """Packs member data back into a NARC with a name table.
-
-    The layout mirrors what the DS SDK's `NARC` tool writes: BTAF, BTNF, GMIF
-    with 4-byte alignment, so a rebuilt archive has the same shape as the one
-    it replaces.
-    """
+def build(members: list[Member]) -> bytes:
+    """Packs members into a NARC laid out the way the DS SDK writes one."""
     payload = bytearray()
-    offsets = []
+    ranges = []
     for member in members:
-        offsets.append((base + len(payload), base + len(payload) + len(member.data)))
+        ranges.append((len(payload), len(payload) + len(member.data)))
         payload += member.data
         while len(payload) % 4:
             payload.append(0)
 
-    btaf = bytearray(BTAF)
-    btaf += struct.pack("<IHHII", 0x0C + 8 + len(members) * 8, 0x0100, 0x0001,
-                        len(members), base)
-    for start, end in offsets:
-        btaf += struct.pack("<II", start, end)
-    btaf += pack_names([m.path for m in members])
+    fatb = bytearray(BTAF)
+    fatb += struct.pack("<IHH", FATB_HEADER_SIZE + 8 * len(members),
+                        len(members), 0)
+    for start, end in ranges:
+        fatb += struct.pack("<II", start, end)
+
+    fntb = bytearray(BTNF)
+    names = bytearray()
+    name_offset = 8  # one directory entry
+    for member in members:
+        name = member.path.rsplit("/", 1)[-1].encode("shift-jis", errors="replace")
+        name_offset = name_offset if names else 8
+        names.append(len(name))
+        names += name
+        name_offset = 8
+    names.append(0)
+    fntb += struct.pack("<IHH", 8, 0, 1)  # root: names at 8, files from 0, 1 dir
+    fntb += names
+    while len(fntb) % 4:
+        fntb.append(0)
+    struct.pack_into("<I", fntb, 4, len(fntb))
 
     gmif = bytearray(GMIF)
-    gmif += struct.pack("<I", 8 + len(payload))
+    gmif += struct.pack("<I", FIMG_HEADER_SIZE + len(payload))
     gmif += payload
 
-    total = 0x10 + len(btaf) + len(gmif)
-    header = MAGIC + struct.pack("<HHIHH", 0xFFFE, 0x0100, total, 0x10, 2)
-    return bytes(header + btaf + gmif)
-
-
-def pack_names(paths: list[str]) -> bytes:
-    """Builds a flat BTNF for the given paths (all files in one directory)."""
-    names = [p.rsplit("/", 1)[-1] for p in paths]
-    table = bytearray(struct.pack("<4sHH", BTNF, 0x0C + 8 + sum(1 + len(n) for n in names) + 1 + 8, 0x0100))
-    table += struct.pack("<IH", 8, 1)  # one directory at offset 8, first id 0
-    for name in names:
-        table.append(len(name))
-        table += name.encode("shift-jis", errors="replace")
-    table.append(0)
-    while len(table) % 4:
-        table.append(0)
-    struct.pack_into("<I", table, 4, len(table))
-    return bytes(table)
+    total = NARC_HEADER_SIZE + len(fatb) + len(fntb) + len(gmif)
+    header = MAGIC + struct.pack("<HHIHH", 0xFFFE, 1, total, NARC_HEADER_SIZE, 3)
+    return bytes(header + fatb + fntb + gmif)

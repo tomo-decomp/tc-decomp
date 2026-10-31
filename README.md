@@ -1,8 +1,8 @@
-# tomo_coll_decomp
+# tc-decomp
 
 A work-in-progress decompilation of **Tomodachi Collection** (Nintendo DS, Japan,
-game code `CCUJ`), in the same spirit as the other projects under `dsdecomp/`.
-The long-term goal is matching C source for the ARM9 program, and beyond that a
+game code `CCUJ`), in the same spirit as the other projects (eg. pokeplatinum)`.
+The long-term goal is matching C source for the ARM9 program, translating the game and Mii voieces to English, and beyond that a
 native PC port.
 
 No copyrighted game data lives in this repository: you supply your own
@@ -15,7 +15,7 @@ legally obtained ROM dump, and the tools derive everything locally.
 | 1. ROM extraction and byte-identical rebuild | **done** |
 | 2. Delinking, disassembly, byte-identical reassembly | **first pass done** (linear sweep, 219 ARM9 starts + all 111 overlays); recursion-descent and SDK split pending |
 | 3. Decompilation to matching C (`src/`) | **in progress** (19 functions, `0x2a4` bytes) |
-| 4. Data formats (archives, text, graphics) | not started |
+| 4. Data formats (archives, text, graphics) | **in progress** — `tools/assets.py` expands every archive and converts 2D graphics to PNG, message banks to TSV and the sound archive to its files; SWAR/STRM decoding and text re-import pending |
 | 5. Native PC port | not started |
 
 Milestone 1 is verified: `extract -> build` reproduces the ROM bit for bit
@@ -97,20 +97,44 @@ linking them needs the Metrowerks MSL standard library, which is not
 redistributable, so the ROM-link target lands with the rest of milestone 3.
 Today the harness is the authority on byte-exactness.
 
+### Assets (milestone 4)
+
+```sh
+python3 tools/assets.py index     # every leaf: path, format, size
+python3 tools/assets.py unpack    # the cartridge tree, archives expanded
+python3 tools/assets.py extract   # ... plus PNG, TSV and the split SDAT
+```
+
+Output lands in `build/assets/` (generated, gitignored):
+
+- `unpack/` — the filesystem with archives expanded and extensions chosen from
+  each leaf's magic, so 4,844 files are browsable in a normal file manager
+- `art/` — every NCLR, NCGR and NSCR as PNG (tiles are converted against the
+  palette from the same archive)
+- `text/` — every BMG message bank as `id<TAB>text`, UTF-16LE decoded, ready to
+  translate
+- `audio/` — the SDAT split into SSEQ/SBNK/SWAR/SSAR/STRM files, plus a WAV per
+  standalone sample
+
+The formats, the byte offsets they were measured at, and what is still
+unconverted (SWAR sample tables, STRM headers, text re-import) are documented in
+[docs/assets.md](docs/assets.md).  The extractor reads the ROM directly; nothing
+it produces is committed.
+
 ## Repository structure
 
-- `tools/` — ROM extraction, rebuild, verification, disassembly and the
-  matching harness (`match.py`)
+- `tools/` — ROM extraction, rebuild, verification, disassembly, the matching
+  harness (`match.py`) and the asset pipeline (`assets.py`, `tomolib/`)
 - `src/` — decompiled C, one file per function, grouped by binary
   (`src/arm9/`, `src/ovNNN/`)
 - `include/` — shared headers (currently the MSL stand-ins the compiler needs)
 - `meson/`, `subprojects/` — build definition and the pinned NitroSDK,
   NitroSystem and libvct wraps, as in the other DS projects here
 - `docs/` — technical notes, measured cartridge layout, disassembly findings,
-  and the decompilation workflow
+  the decompilation workflow, and the asset formats (`assets.md`)
 - `extract/` — extracted ROM contents (generated, gitignored)
-- `build/` — build artifacts, disassembly listings, match results
-  (generated, gitignored)
+- `build/` — build artifacts, disassembly listings, match results and the
+  extracted assets (generated, gitignored)
 
 ## Legal
 
